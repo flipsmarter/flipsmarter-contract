@@ -17,15 +17,29 @@ struct ProjectInfo {
 	bytes  description;
 }
 
+// @dev FlipSmarter is for fund-raising, it is an enhance evm version of flipstarter.
 contract FlipSmarter {
+	// @dev The creater of fund-raising project (also the fund receiver) must deposit some pledge during 
+	// creation, which will be returned when the project finishes. This pledge ensures on-chain resources
+	// are not abused.
 	uint public pledge; //TODO: some function to change it
 
+	// @dev A project is identified by its name whose lenght is no larger than 32. With its name, you can
+	// query its detailed information. Two projects with the same name cannot be active at the same time.
 	mapping(bytes32 => ProjectInfo) private projNameToInfo;
 
+	// @dev A list of currently active projects
 	bytes32[] private projectNameList;
+
+	// @dev Maps a project's name to its index (where to find its name in projectNameList) and the
+	// amount donated to it so far.
 	mapping(bytes32 => uint) private projNameToIdxAmt;
 
+	// @dev This map's key is project name and its value is a list of donators 
 	mapping(bytes32 => address[]) private projDonatorList;
+
+	// @dev Given a project's name and a donator's address, query the donator's index (where to find it
+	// in the projDonatorList) and her donated amount to this project.
 	mapping(bytes32 => mapping(address => uint)) private projDonatorToIdxAmt;
 
 	// @dev The address of precompile smart contract for SEP101
@@ -34,12 +48,36 @@ contract FlipSmarter {
 	// @dev The address of precompile smart contract for SEP206
 	address constant SEP206Contract = address(bytes20(uint160(0x2711)));
 
+	// @dev The upper bound of how long a project can keep active
 	uint constant MaxTimeSpan = 60 * 24 * 3600; // 60 days
+
+	// @dev The upper bound of how many donators a project can has
 	uint constant MaxDonatorCount = 500;
+
+	// @dev The upper bound of a project's description length
 	uint constant MaxDescriptionLength = 512;
+
+	// @dev The upper bound of a donator's message length
 	uint constant MaxMessageLength = 128;
+
+	// @dev If the list of donators has less member of this count, it can be cleared when finishing
+	// a project.
 	uint constant DonatorLastClearCount = 60;
-	uint constant MaxReturnedSliceSize = 300;
+
+	// @dev Given a project's deadline and the amount donated to it, returns whether it's finalized
+	// If now is after the deadline, then it's finalized.
+	// If now is still before the deadline but the donated coins are more than maxRaisedAmount, then
+	// it's also finalized.
+	// If a project is finalized, you cannot donate to it anymore.
+	// If a project is finalized and succeeds, you cannot undonate from it anymore.
+	// After a project is finalized, anyone can clear the donators' records, and if it fails, return the
+	// donated coins as well. The project owner cannot finish a project before all the donators' records
+	// are cleared.
+	function isFinalized(ProjectInfo memory info, uint donatedAmount) private view returns (bool) {
+		return (block.timestamp > info.deadline || donatedAmount > info.maxRaisedAmount);
+	}
+
+	// =================================================================
 
 	function safeTransfer(address receiver, uint value) private {
 		receiver.call{value: value, gas: 9000}("");
@@ -67,11 +105,6 @@ contract FlipSmarter {
 		projNameToIdxAmt[projectName] = (index<<96) | amount;
 	}
 
-	function getProjectIndexAndAmount(bytes32 projectName) private view returns (uint index, uint amount) {
-		uint word = projNameToIdxAmt[projectName];
-		return (uint(uint64(word>>96)), uint(uint96(word)));
-	}
-
 	function getProjectIndex(bytes32 projectName) private view returns (uint) {
 		uint word = projNameToIdxAmt[projectName];
 		return uint(uint64(word>>96));
@@ -82,6 +115,8 @@ contract FlipSmarter {
 		return uint(uint96(word));
 	}
 
+	// @dev Remove a project's name from projectNameList and projNameToIdxAmt, keeping the indexes
+	// contained in projNameToIdxAmt valid.
 	function removeProjectIndexAndAmount(bytes32 projectName) private {
 		uint index = getProjectIndex(projectName);
 		delete projNameToIdxAmt[projectName];
@@ -100,11 +135,6 @@ contract FlipSmarter {
 		projDonatorToIdxAmt[projectName][donator] = (index<<96) | amount;
 	}
 
-	function getDonatorIndexAndAmount(bytes32 projectName, address donator) private view returns (uint index, uint amount) {
-		uint word = projDonatorToIdxAmt[projectName][donator];
-		return (uint(uint64(word>>96)), uint(uint96(word)));
-	}
-
 	function getDonatorIndex(bytes32 projectName, address donator) private view returns (uint) {
 		uint word = projDonatorToIdxAmt[projectName][donator];
 		return uint(uint64(word>>96));
@@ -115,6 +145,8 @@ contract FlipSmarter {
 		return uint(uint96(word));
 	}
 	
+	// @dev Remove a donator's address from projDonatorList[projectName] and projDonatorToIdxAmt[projectName],
+	// keeping the indexes contained in projDonatorToIdxAmt[projectName] valid.
 	function removeDonatorIndexAndAmount(bytes32 projectName, address donator) private returns (uint) {
 		uint index = getDonatorIndex(projectName, donator);
 		delete projDonatorToIdxAmt[projectName][donator];
@@ -131,14 +163,22 @@ contract FlipSmarter {
 	}
 
 	// =================================================================
+
+	// @dev When the donators' records are all erased for a project, use this function to erase all the records
+	// of the project itself from this smart contract. After this erasion, the project's name can be reused for
+	// some other project.
 	function removeProject(bytes32 projectName) private {
 		address[] storage donatorList = projDonatorList[projectName];
 		require(donatorList.length == 0, "donators-records-not-cleared");
-		delete projDonatorList[projectName];
 		deleteProjectInfo(projectName);
 		removeProjectIndexAndAmount(projectName);
 	}
 
+	// @dev Remove at most `count` donators addresses from projDonatorList[projectName] and
+	// projDonatorToIdxAmt[projectName]. At the same time, return the donated coins to the donators,
+	// if this project fails.
+	// Requirements:
+	// - This project must have been finalized
 	function clearDonators(bytes32 projectName, uint count) external {
 		ProjectInfo memory info;
 		loadProjectInfo(projectName, info);
@@ -149,8 +189,10 @@ contract FlipSmarter {
 		_clearDonators(projectName, count, donatorList, returnCoins, info.coinType);
 	}
 
+	// @dev Remove at most `count` donators addresses from donatorList and projDonatorToIdxAmt[projectName],
+	// At the same time, return the donated SEP20 coins of `coinType` to the donators if returnCoins==true.
 	function _clearDonators(bytes32 projectName, uint count, address[] storage donatorList,
-		bool returnCoins, address coinType) private {
+							bool returnCoins, address coinType) private {
 		if(count > donatorList.length) {
 			count = donatorList.length;
 		}
@@ -165,6 +207,20 @@ contract FlipSmarter {
 		}
 	}
 
+	// @dev Create a new fund-raising project by depositing `pledge` BCH in this contract. 
+	// @param deadline No more donations are accepted after deadline. After deadline, the project is finalized.
+	//  It cannot be later than `MaxTimeSpan` seconds later.
+	// @param minDonationAmount The minimum amount of one single donation.
+	// @param minRaisedAmount The minimum raised amount, if the raised fund is less than this value, then 
+	//  this project fails.
+	// @param maxRaisedAmount The maximum raised amount, if the raised fund is more than this value, then 
+	//  this project is finalized immediately, even before the deadline.
+	// @param coinType Which kind of SEP20 token this project raises. Set it to 0x2711 for BCH.
+	// @param projectName The project's name, which can uniquely identify one project. Its length must be 
+	//  no longer than 32.
+	// @param description Which describes this project. Its length must be longer than `MaxDescriptionLength`.
+	// Requirements:
+	// - This project's total donators (determinded by minDonationAmount) cannot be more than `MaxDonatorCount`
 	function create(uint64 deadline, uint96 minDonationAmount, uint96 maxRaisedAmount, uint96 minRaisedAmount,
 		address coinType, bytes32 projectName, bytes calldata description) external payable {
 		require(block.timestamp + MaxTimeSpan > deadline, "deadline-must-be-in-60-days");
@@ -185,10 +241,10 @@ contract FlipSmarter {
 		projectNameList.push(projectName);
 	}
 
-	function isFinalized(ProjectInfo memory info, uint donatedAmount) private view returns (bool) {
-		return (block.timestamp > info.deadline || donatedAmount > info.maxRaisedAmount);
-	}
-
+	// @dev Finish a project by returning the pledge BCH back to its owner and removing its records.
+	//  If it succeeds, send the raised coins to its owner as well.
+	// Requirements:
+	// - The donators' records must be no more than `DonatorLastClearCount`
 	function finish(bytes32 projectName) external {
 		ProjectInfo memory info;
 		loadProjectInfo(projectName, info);
@@ -198,6 +254,8 @@ contract FlipSmarter {
 		bool succeed = donatedAmount >= info.minRaisedAmount;
 		if(donatorList.length <= DonatorLastClearCount) {
 			_clearDonators(projectName, donatorList.length, donatorList, !succeed, info.coinType);
+		} else {
+			require(false, "too-many-remained-donator-records");
 		}
 		if(succeed) {
 			IERC20(info.coinType).transfer(info.receiver, donatedAmount);
@@ -206,10 +264,18 @@ contract FlipSmarter {
 		IERC20(SEP206Contract).transfer(info.receiver, pledge);
 	}
 
+	// @dev Donate `amount` coins to a project named `projectName`, and leave a `message` to its owner.
+	// Requirements:
+	// - This project has not been finalized.
+	// - This donator has not donated to this project before, or has undonated her donation.
 	function donate(bytes32 projectName, uint96 amount, bytes calldata message) external payable {
 		require(message.length <= MaxMessageLength, "message-too-long");
 		ProjectInfo memory info;
 		loadProjectInfo(projectName, info);
+		uint donatedAmount = getProjectAmount(projectName);
+		require(!isFinalized(info, donatedAmount), "already-finalized");
+		uint oldAmount = getDonatorAmount(projectName, msg.sender);
+		require(oldAmount == 0, "already-donated");
 		uint realAmount = uint(amount);
 		if(info.coinType == SEP206Contract) {
 			require(msg.value == uint(amount), "value-mismatch");
@@ -225,40 +291,51 @@ contract FlipSmarter {
 		donatorList.push(msg.sender);
 	}
 
+	// @dev Undo your donation to a project.
+	// Requirements:
+	// - If the project succeeds and is finalized, you cannot undonate.
 	function undonate(bytes32 projectName) external {
 		ProjectInfo memory info;
 		loadProjectInfo(projectName, info);
 		uint donatedAmount = getProjectAmount(projectName);
-		require(!isFinalized(info, donatedAmount), "already-finalized");
+		if(isFinalized(info, donatedAmount)) {
+			require(donatedAmount < info.minRaisedAmount, "cannot-undonate-after-success");
+		}
 		uint amount = removeDonatorIndexAndAmount(projectName, msg.sender);
 		IERC20(info.coinType).transfer(msg.sender, amount);
 	}
 
 	//==========================================================
-	function getProjectInfo(bytes32 projectName) external view returns (ProjectInfo memory info, uint amount) {
+
+	// @dev Query a project's detail and the amount donated to it so far.
+	function getProjectInfoAndDonatedAmount(bytes32 projectName) external view returns (
+						ProjectInfo memory info, uint amount) {
 		loadProjectInfo(projectName, info);
 		amount = getProjectAmount(projectName);
 	}
 
-	function getProjectNames(uint start, uint end) external view returns (bytes32[] memory names, uint count) {
+	// @dev Returns projectNameList's content between `start` and `end` as `names`, and its length as count.
+	function getProjectNames(uint start, uint end) external view returns (uint count, bytes32[] memory names) {
 		count = projectNameList.length;
 		if(end > count) {
 			end = count;
 		}
 		if(end <= start) {
 			names = new bytes32[](0);
-			return (names, count);
+			return (count, names);
 		}
 		uint size = end - start;
-		require(size < MaxReturnedSliceSize, "size-too-large");
 		names = new bytes32[](size);
 		for(uint i=start; i<end; i++) {
 			names[i-start] = projectNameList[i];
 		}
 	}
 
+	// @dev Returns projDonatorList[projectName]'s content between `start` and `end` as `donators`, and
+	// its length as count. For each donator in `donators`, her donated amount is recorded in `amounts`,
+	// at the same index as in `donators`.
 	function getDonations(bytes32 projectName, uint start, uint end) external view returns (
-			address[] memory donators, uint[] memory amounts, uint count) {
+			uint count, address[] memory donators, uint[] memory amounts) {
 		address[] storage donatorList = projDonatorList[projectName];
 		count = donatorList.length;
 		if(end > count) {
@@ -267,10 +344,9 @@ contract FlipSmarter {
 		if(end <= start) {
 			donators = new address[](0);
 			amounts = new uint[](0);
-			return (donators, amounts, count);
+			return (count, donators, amounts);
 		}
 		uint size = end - start;
-		require(size < MaxReturnedSliceSize, "size-too-large");
 		donators = new address[](size);
 		amounts = new uint[](size);
 		for(uint i=start; i<end; i++) {
