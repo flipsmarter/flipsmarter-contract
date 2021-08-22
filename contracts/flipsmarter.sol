@@ -17,12 +17,18 @@ struct ProjectInfo {
 	bytes  description;
 }
 
-// @dev FlipSmarter is for fund-raising, it is an enhance evm version of flipstarter.
+// @dev FlipSmarter is for fund-raising, it is an enhance evm version of flipstarter.cash
 contract FlipSmarter {
 	// @dev The creater of fund-raising project (also the fund receiver) must deposit some pledge during 
 	// creation, which will be returned when the project finishes. This pledge ensures on-chain resources
 	// are not abused.
-	uint public pledge; //TODO: some function to change it
+	uint public pledge;
+
+	// @dev The one who can change pledge's value
+	address public pledgeSetter;
+
+	// @dev The address which will replace pledgeSetter
+	address public newPledgeSetter;
 
 	// @dev A project is identified by its name whose lenght is no larger than 32. With its name, you can
 	// query its detailed information. Two projects with the same name cannot be active at the same time.
@@ -64,6 +70,22 @@ contract FlipSmarter {
 	// a project.
 	uint constant DonatorLastClearCount = 60;
 
+	// =================================================================
+
+	// @dev Emitted when a new project is create
+	event Create(bytes32 indexed projectName);
+
+	// @dev Emitted when a new project is finished
+	event Finish(bytes32 indexed projectName);
+
+	// @dev Emitted when someone donates to a project
+	event Donate(bytes32 indexed projectName, address indexed donator, uint amount, bytes message);
+
+	// @dev Emitted when someone undonates from a project
+	event Undonate(bytes32 indexed projectName, address indexed donator, uint amount);
+
+	// =================================================================
+
 	// @dev Given a project's deadline and the amount donated to it, returns whether it's finalized
 	// If now is after the deadline, then it's finalized.
 	// If now is still before the deadline but the donated coins are more than maxRaisedAmount, then
@@ -79,8 +101,12 @@ contract FlipSmarter {
 
 	// =================================================================
 
-	function safeTransfer(address receiver, uint value) private {
-		receiver.call{value: value, gas: 9000}("");
+	function safeTransfer(address coinType, address receiver, uint value) private {
+		if(coinType == SEP206Contract) {
+			receiver.call{value: value, gas: 9000}("");
+		} else {
+			IERC20(coinType).transfer(receiver, value);
+		}
 	}
 
 	function saveProjectInfo(bytes32 projectName, ProjectInfo memory info) private {
@@ -90,10 +116,6 @@ contract FlipSmarter {
 	function loadProjectInfo(bytes32 projectName, ProjectInfo memory info) private view {
 		info = projNameToInfo[projectName];
 		require(info.bornTime != 0, "project-not-found");
-	}
-
-	function getProjectInfoAsBytes(bytes32 projectName) private returns (bytes memory) {//TODO
-		return abi.encode(projNameToInfo[projectName]);
 	}
 
 	function deleteProjectInfo(bytes32 projectName) private {
@@ -202,7 +224,7 @@ contract FlipSmarter {
 			uint amount = getDonatorAmount(projectName, donator);
 			delete projDonatorToIdxAmt[projectName][donator];
 			if(returnCoins) {
-				IERC20(coinType).transfer(donator, amount);
+				safeTransfer(coinType, donator, amount);
 			}
 		}
 	}
@@ -239,6 +261,7 @@ contract FlipSmarter {
 		saveProjectInfo(projectName, info);
 		setProjectIndexAndAmount(projectName, projectNameList.length, 0);
 		projectNameList.push(projectName);
+		emit Create(projectName);
 	}
 
 	// @dev Finish a project by returning the pledge BCH back to its owner and removing its records.
@@ -258,10 +281,11 @@ contract FlipSmarter {
 			require(false, "too-many-remained-donator-records");
 		}
 		if(succeed) {
-			IERC20(info.coinType).transfer(info.receiver, donatedAmount);
+			safeTransfer(info.coinType, info.receiver, donatedAmount);
 		}
 		removeProject(projectName);
-		IERC20(SEP206Contract).transfer(info.receiver, pledge);
+		safeTransfer(SEP206Contract, info.receiver, pledge);
+		emit Finish(projectName);
 	}
 
 	// @dev Donate `amount` coins to a project named `projectName`, and leave a `message` to its owner.
@@ -289,6 +313,7 @@ contract FlipSmarter {
 		address[] storage donatorList = projDonatorList[projectName];
 		setDonatorIndexAndAmount(projectName, msg.sender, donatorList.length, realAmount);
 		donatorList.push(msg.sender);
+		emit Donate(projectName, msg.sender, realAmount, message);
 	}
 
 	// @dev Undo your donation to a project.
@@ -302,9 +327,27 @@ contract FlipSmarter {
 			require(donatedAmount < info.minRaisedAmount, "cannot-undonate-after-success");
 		}
 		uint amount = removeDonatorIndexAndAmount(projectName, msg.sender);
-		IERC20(info.coinType).transfer(msg.sender, amount);
+		safeTransfer(info.coinType, msg.sender, amount);
+		emit Undonate(projectName, msg.sender, amount);
 	}
 
+	// =================================================================
+
+	function setPledge(uint value) external {
+		require(msg.sender == pledgeSetter, "not-pledge-setter");
+		pledge = value;
+	}
+
+	function changePledgeSetter(address newSetter) external {
+		require(msg.sender == pledgeSetter, "not-pledge-setter");
+		newPledgeSetter = newSetter;
+	}
+
+	function switchPledgeSetter() external {
+		require(msg.sender == newPledgeSetter, "not-new-pledge-setter");
+		pledgeSetter = newPledgeSetter;
+	}
+	
 	//==========================================================
 
 	// @dev Query a project's detail and the amount donated to it so far.
@@ -357,4 +400,3 @@ contract FlipSmarter {
 		}
 	}
 }
-
