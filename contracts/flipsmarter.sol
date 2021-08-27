@@ -284,19 +284,26 @@ contract FlipSmarter {
 	//  or smaller than DonatorLastClearCount, such that it can be cleared in this function call.
 	// Requirements:
 	// - The donators' records must be no more than `DonatorLastClearCount`
+	// - This campaign is finalized, or the creater wants to finish it because of no donator at all (zero donation value)
 	function finish(bytes32 campaignName) external {
 		CampaignInfo memory info = loadCampaignInfo(campaignName);
 		uint donatedAmount = getCampaignAmount(campaignName);
-		require(isFinalized(info, donatedAmount), "not-finalized");
-		bool succeed = donatedAmount >= info.minRaisedAmount;
-		address[] storage donatorList = campDonatorList[campaignName];
-		if(donatorList.length > DonatorLastClearCount) {
-			require(false, "too-many-remained-donator-records");
-		} else if(donatorList.length != 0) {
-			_clearDonators(campaignName, donatorList.length, donatorList, !succeed, info.coinType);
-		}
-		if(succeed) {
-			safeTransfer(info.coinType, info.receiver, donatedAmount);
+		if(donatedAmount == 0) {
+			if(block.timestamp < info.deadline) {
+				require(msg.sender == info.receiver, "not-creater");
+			}
+		} else {
+			require(isFinalized(info, donatedAmount), "not-finalized");
+			bool succeed = donatedAmount >= info.minRaisedAmount;
+			address[] storage donatorList = campDonatorList[campaignName];
+			if(donatorList.length > DonatorLastClearCount) {
+				require(false, "too-many-remained-donator-records");
+			} else if(donatorList.length != 0) {
+				_clearDonators(campaignName, donatorList.length, donatorList, !succeed, info.coinType);
+			}
+			if(succeed) {
+				safeTransfer(info.coinType, info.receiver, donatedAmount);
+			}
 		}
 		removeCampaign(campaignName);
 		safeTransfer(SEP206Contract, info.receiver, info.pledgeU32*PledgeUnit);
