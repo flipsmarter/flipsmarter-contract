@@ -9,10 +9,10 @@ struct CampaignInfo {
 	uint96 minDonationAmount;
 	uint32 pledgeU32;
 
-	uint96  maxRaisedAmount;
+	uint96  hardTarget;
 	address receiver;
 
-	uint96  minRaisedAmount;
+	uint96  softTarget;
 	address coinType;
 
 	bytes  description;
@@ -92,7 +92,7 @@ contract FlipSmarter {
 
 	// @dev Given a campaign's deadline and the donated amount, returns whether it's finalized
 	// If now is after the deadline, then it's finalized.
-	// If now is still before the deadline but the donated amount is more than maxRaisedAmount, then
+	// If now is still before the deadline but the donated amount is more than hardTarget, then
 	// it's also finalized.
 	// If a campaign is finalized, you cannot donate to it anymore.
 	// If a campaign is finalized and succeeds, you cannot undonate from it anymore.
@@ -100,7 +100,7 @@ contract FlipSmarter {
 	// coins is returned as the records are cleared. The campaign owner cannot finish a campaign before all
 	// the donators' records are cleared.
 	function isFinalized(CampaignInfo memory info, uint donatedAmount) private view returns (bool) {
-		return (block.timestamp > info.deadline || donatedAmount > info.maxRaisedAmount);
+		return (block.timestamp > info.deadline || donatedAmount > info.hardTarget);
 	}
 
 	// =================================================================
@@ -214,7 +214,7 @@ contract FlipSmarter {
 		CampaignInfo memory info = loadCampaignInfo(campaignName);
 		uint donatedAmount = getCampaignAmount(campaignName);
 		require(isFinalized(info, donatedAmount), "not-finalized");
-		bool returnCoins = donatedAmount < info.minRaisedAmount;
+		bool returnCoins = donatedAmount < info.softTarget;
 		address[] storage donatorList = campDonatorList[campaignName];
 		_clearDonators(campaignName, count, donatorList, returnCoins, info.coinType);
 	}
@@ -241,9 +241,9 @@ contract FlipSmarter {
 	// @param deadline No more donations are accepted after deadline. After deadline, the campaign is finalized.
 	//  It cannot be after `MaxTimeSpan` seconds later.
 	// @param minDonationAmount The minimum amount of one single donation.
-	// @param minRaisedAmount The minimum raised amount, if the raised fund is less than this value, then 
+	// @param softTarget The minimum raised amount, if the raised fund is less than this value, then 
 	//  this campaign fails and the fund must be returned to the donators.
-	// @param maxRaisedAmount The maximum raised amount, if the raised fund is more than this value, then 
+	// @param hardTarget The maximum raised amount, if the raised fund is more than this value, then 
 	//  this campaign is finalized immediately, even before the deadline.
 	// @param coinType Which kind of SEP20 token this campaign raises. Set it to 0x2711 when raising BCH.
 	// @param campaignName The campaign's name, which can uniquely identify one campaign. Its length must be 
@@ -253,24 +253,24 @@ contract FlipSmarter {
 	// Requirements:
 	// - Currently there are no other active campaign been named as `campaignName`
 	// - This campaign's total donators (determinded by minDonationAmount) cannot be more than `MaxDonatorCount`
-	// - `maxRaisedAmount` must no less than `minRaisedAmount`
-	function start(uint64 deadline, uint96 minDonationAmount, uint96 maxRaisedAmount, uint96 minRaisedAmount,
+	// - `hardTarget` must no less than `softTarget`
+	function start(uint64 deadline, uint96 minDonationAmount, uint96 hardTarget, uint96 softTarget,
 			address coinType, bytes32 campaignName, bytes calldata description) external payable {
 		require(block.timestamp + MaxTimeSpan > deadline, "deadline-must-be-in-60-days");
-		require(uint(minDonationAmount)*MaxDonatorCount > uint(maxRaisedAmount), "too-many-donators");
+		require(uint(minDonationAmount)*MaxDonatorCount > uint(hardTarget), "too-many-donators");
 		uint pledge = pledgeU32 * PledgeUnit;
 		require(msg.value == pledge, "incorrect-pledge");
 		require(description.length <= MaxDescriptionLength, "description-too-long");
-		require(maxRaisedAmount >= minRaisedAmount, "incorrect-amount");
+		require(hardTarget >= softTarget, "incorrect-amount");
 		CampaignInfo memory info = campNameToInfo[campaignName];
 		require(info.bornTime == 0, "campaign-name-conflicts");
 		info.pledgeU32 = pledgeU32;
 		info.bornTime = uint64(block.timestamp);
 		info.deadline = deadline;
 		info.minDonationAmount = minDonationAmount;
-		info.maxRaisedAmount = maxRaisedAmount;
+		info.hardTarget = hardTarget;
 		info.receiver = msg.sender;
-		info.minRaisedAmount = minRaisedAmount;
+		info.softTarget = softTarget;
 		info.coinType = coinType;
 		info.description = description;
 		saveCampaignInfo(campaignName, info);
@@ -294,7 +294,7 @@ contract FlipSmarter {
 			}
 		} else {
 			require(isFinalized(info, donatedAmount), "not-finalized");
-			bool succeed = donatedAmount >= info.minRaisedAmount;
+			bool succeed = donatedAmount >= info.softTarget;
 			address[] storage donatorList = campDonatorList[campaignName];
 			if(donatorList.length > DonatorLastClearCount) {
 				require(false, "too-many-remained-donator-records");
@@ -344,7 +344,7 @@ contract FlipSmarter {
 		CampaignInfo memory info = loadCampaignInfo(campaignName);
 		uint donatedAmount = getCampaignAmount(campaignName);
 		if(isFinalized(info, donatedAmount)) {
-			require(donatedAmount < info.minRaisedAmount, "cannot-undonate-after-success");
+			require(donatedAmount < info.softTarget, "cannot-undonate-after-success");
 		}
 		uint amount = removeDonatorIndexAndAmount(campaignName, msg.sender);
 		safeTransfer(info.coinType, msg.sender, amount);
